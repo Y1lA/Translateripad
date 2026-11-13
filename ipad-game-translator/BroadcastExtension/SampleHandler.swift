@@ -13,12 +13,20 @@ class SampleHandler: RPBroadcastSampleHandler {
 
     private let appGroup = "group.com.tvtranslator.ipad"
     private var lastProcessTime: CFAbsoluteTime = 0
-    private var lastModeCheckTime: CFAbsoluteTime = 0
-    private var lastSendTime: CFAbsoluteTime = 0
+    private var lastConfigCheckTime: CFAbsoluteTime = 0
+    private var lastKeepAliveTime: CFAbsoluteTime = 0
     private var emptyFramesCount: Int = 0
+
     private var activeMode: String = "menus"
-    private var lastSignature: String = ""
+    private var activeKey: String = ""
+    private var activeModel: String = "gemma-4-26b-a4b-it"
+    private var activeGame: String = "GTA 6"
+
+    private var lastTokenSet: Set<String> = []
+    private var lastPixelSignature: Int = 0
+    private var dialogueHistory: [String] = []
     private var isTranslating: Bool = false
+
     private var cache: [String: String] = [
         "PLAY": "اللعب",
         "SETTINGS": "الإعدادات",
@@ -55,26 +63,38 @@ class SampleHandler: RPBroadcastSampleHandler {
     ]
 
     override func broadcastStarted(withSetupInfo setupInfo: [String : NSObject]?) {
-        lastSignature = ""
+        lastTokenSet = []
+        lastPixelSignature = 0
         emptyFramesCount = 0
-        fetchModeFromTV()
+        fetchConfigFromTV()
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
         guard sampleBufferType == .video else { return }
 
         let now = CFAbsoluteTimeGetCurrent()
-        if now - lastModeCheckTime > 4.0 {
-            lastModeCheckTime = now
-            fetchModeFromTV()
+        if now - lastConfigCheckTime > 4.0 {
+            lastConfigCheckTime = now
+            fetchConfigFromTV()
         }
 
-        if now - lastProcessTime < 0.8 || isTranslating {
+        if now - lastProcessTime < 0.75 || isTranslating {
             return
         }
         lastProcessTime = now
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // فحص سريع لتغير البيكسلات لتخفيف الضغط ومنع القراءة المكررة
+        let sig = quickPixelFingerprint(pixelBuffer)
+        if sig == lastPixelSignature && !lastTokenSet.isEmpty {
+            if now - lastKeepAliveTime > 3.5 {
+                lastKeepAliveTime = now
+                sendKeepAlive()
+            }
+            return
+        }
+        lastPixelSignature = sig
 
         var cgOrientation: CGImagePropertyOrientation = .up
         if let orientationNum = CMGetAttachment(sampleBuffer, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber,
@@ -87,17 +107,37 @@ class SampleHandler: RPBroadcastSampleHandler {
         }
     }
 
-    private func fetchModeFromTV() {
+    private func quickPixelFingerprint(_ pixelBuffer: CVPixelBuffer) -> Int {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return 0 }
+        let bpr = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let h = CVPixelBufferGetHeight(pixelBuffer)
+        let ptr = base.assumingMemoryBound(to: UInt8.self)
+        var acc = 0
+        let stepY = max(1, h / 10)
+        for y in stride(from: stepY, to: h, by: stepY) {
+            let row = y * bpr
+            for col in stride(from: 40, to: min(bpr, 1200), by: 160) {
+                acc = acc &+ (Int(ptr[row + col]) / 8)
+            }
+        }
+        return acc
+    }
+
+    private func fetchConfigFromTV() {
         let defaults = UserDefaults(suiteName: appGroup)
         let tvIP = defaults?.string(forKey: "tvIP")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "192.168.0.138"
-        guard let url = URL(string: "http://\(tvIP):8765/?getmode=1") else { return }
+        guard let url = URL(string: "http://\(tvIP):8765/?getconfig=1") else { return }
         var req = URLRequest(url: url)
         req.timeoutInterval = 1.5
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-            guard let data = data, let m = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
-            if m == "subtitles" || m == "menus" {
-                self?.activeMode = m
-            }
+            guard let self = self, let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            if let m = json["mode"] as? String, (m == "subtitles" || m == "menus") { self.activeMode = m }
+            if let k = json["key"] as? String { self.activeKey = k.trimmingCharacters(in: .whitespacesAndNewlines) }
+            if let mod = json["model"] as? String, !mod.isEmpty { self.activeModel = mod }
+            if let g = json["game"] as? String, !g.isEmpty { self.activeGame = g }
         }.resume()
     }
 
@@ -105,9 +145,18 @@ class SampleHandler: RPBroadcastSampleHandler {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         if t.count < 3 { return true }
         let lower = t.lowercased()
-        if lower.contains("remote play") || lower.contains("connected") { return true }
+        let ignoreList = ["remote play", "connected", "car speed", "ball speed", "fps", "ping"]
+        if ignoreList.contains(where: { lower.contains($0) }) { return true }
         let letters = t.unicodeScalars.filter { CharacterSet.letters.contains($0) }
         return letters.count < 3
+    }
+
+    private func similarity(_ a: Set<String>, _ b: Set<String>) -> Double {
+        if a.isEmpty && b.isEmpty { return 1.0 }
+        if a.isEmpty || b.isEmpty { return 0.0 }
+        let inter = Double(a.intersection(b).count)
+        let uni = Double(a.union(b).count)
+        return inter / uni
     }
 
     private func recognizeScreen(in pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) {
@@ -121,49 +170,56 @@ class SampleHandler: RPBroadcastSampleHandler {
             guard let self = self else { return }
             guard let observations = req.results as? [VNRecognizedTextObservation] else { return }
 
-            var blocks: [OCRBlock] = []
+            var rawBlocks: [OCRBlock] = []
             for obs in observations {
                 let box = obs.boundingBox
-                if box.size.height < 0.016 { continue }
+                if box.size.height < 0.017 { continue }
                 guard let raw = obs.topCandidates(1).first?.string else { continue }
                 let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                 if self.isNoise(clean) { continue }
 
+                // تصحيح الدوران 180 درجة
                 let x = 1.0 - Double(box.origin.x + box.size.width)
                 var topY = Double(box.origin.y)
-
                 if is4by3 {
                     topY = (topY - 0.095) / 0.81
                 }
-                if topY < 0.02 || topY > 0.96 { continue }
+                if topY < 0.02 || topY > 0.95 { continue }
 
-                blocks.append(OCRBlock(text: clean, x: max(0.02, x), y: topY))
+                rawBlocks.append(OCRBlock(text: clean, x: max(0.02, x), y: topY))
             }
 
-            if blocks.isEmpty {
+            if rawBlocks.isEmpty {
                 self.emptyFramesCount += 1
-                if self.emptyFramesCount >= 2 && !self.lastSignature.isEmpty {
-                    self.lastSignature = ""
-                    self.sendSingleToTV(arabic: "")
+                if self.emptyFramesCount >= 2 && !self.lastTokenSet.isEmpty {
+                    self.lastTokenSet = []
+                    self.sendClearToTV()
                 }
                 return
             }
 
             self.emptyFramesCount = 0
-            let limited = Array(blocks.prefix(mode == "menus" ? 12 : 4))
-            let signature = mode + ":" + limited.map { $0.text }.joined(separator: "|")
-            let now = CFAbsoluteTimeGetCurrent()
+            let limited = Array(rawBlocks.prefix(mode == "menus" ? 12 : 4))
+            let newTokens = Set(limited.flatMap { $0.text.uppercased().split(separator: " ").map(String.init) })
 
-            if signature == self.lastSignature && (now - self.lastSendTime) < 3.5 {
+            let now = CFAbsoluteTimeGetCurrent()
+            if self.similarity(newTokens, self.lastTokenSet) >= 0.80 {
+                if now - self.lastKeepAliveTime > 3.5 {
+                    self.lastKeepAliveTime = now
+                    self.sendKeepAlive()
+                }
                 return
             }
-            self.lastSignature = signature
-            self.lastSendTime = now
+
+            self.lastTokenSet = newTokens
+            self.lastKeepAliveTime = now
 
             if mode == "menus" {
                 self.processMenuBlocks(limited)
             } else {
-                let sentence = limited.map { $0.text }.joined(separator: " ")
+                // ترتيب سطور الحوار من الأعلى للأسفل
+                let ordered = limited.sorted { $0.y < $1.y }
+                let sentence = ordered.map { $0.text }.joined(separator: " ")
                 self.processSubtitle(sentence)
             }
         }
@@ -172,11 +228,12 @@ class SampleHandler: RPBroadcastSampleHandler {
         request.recognitionLanguages = ["en-US"]
         request.usesLanguageCorrection = true
         if mode == "subtitles" {
+            // حصر القراءة في الشريط السفلي الأوسط للحوارات
             request.regionOfInterest = is4by3
-                ? CGRect(x: 0.12, y: 0.11, width: 0.76, height: 0.20)
-                : CGRect(x: 0.12, y: 0.03, width: 0.76, height: 0.20)
+                ? CGRect(x: 0.14, y: 0.11, width: 0.72, height: 0.19)
+                : CGRect(x: 0.14, y: 0.03, width: 0.72, height: 0.19)
         } else {
-            request.regionOfInterest = CGRect(x: 0.02, y: 0.06, width: 0.96, height: 0.88)
+            request.regionOfInterest = CGRect(x: 0.03, y: 0.07, width: 0.94, height: 0.86)
         }
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
@@ -189,10 +246,12 @@ class SampleHandler: RPBroadcastSampleHandler {
             return
         }
         isTranslating = true
-        translateLine(english) { [weak self] arabic in
+        translateDialogue(english) { [weak self] arabic in
             guard let self = self else { return }
             if let arabic = arabic, !arabic.isEmpty {
                 self.cache[english] = arabic
+                self.dialogueHistory.append(english)
+                if self.dialogueHistory.count > 2 { self.dialogueHistory.removeFirst() }
                 self.sendSingleToTV(arabic: arabic)
             }
             self.isTranslating = false
@@ -218,13 +277,9 @@ class SampleHandler: RPBroadcastSampleHandler {
         }
 
         isTranslating = true
-        let defaults = UserDefaults(suiteName: appGroup)
-        let apiKey = defaults?.string(forKey: "geminiKey")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let modelId = defaults?.string(forKey: "modelId")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "gemma-4-26b-a4b-it"
-
-        let lines = needsTranslation.map { $0.text }
-        if !apiKey.isEmpty {
-            translateBatchWithGemini(lines: lines, apiKey: apiKey, modelId: modelId) { [weak self] translated in
+        if !activeKey.isEmpty {
+            let lines = needsTranslation.map { $0.text }
+            translateBatchWithGemini(lines: lines) { [weak self] translated in
                 guard let self = self else { return }
                 if let translated = translated, translated.count == needsTranslation.count {
                     for (idx, item) in needsTranslation.enumerated() {
@@ -264,30 +319,45 @@ class SampleHandler: RPBroadcastSampleHandler {
         }
     }
 
-    private func translateLine(_ text: String, completion: @escaping (String?) -> Void) {
-        let defaults = UserDefaults(suiteName: appGroup)
-        let apiKey = defaults?.string(forKey: "geminiKey")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let modelId = defaults?.string(forKey: "modelId")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "gemma-4-26b-a4b-it"
+    private func translateDialogue(_ text: String, completion: @escaping (String?) -> Void) {
+        if !activeKey.isEmpty {
+            let urlStr = "https://generativelanguage.googleapis.com/v1beta/models/\(activeModel):generateContent?key=\(activeKey)"
+            if let url = URL(string: urlStr) {
+                let ctx = dialogueHistory.isEmpty ? "" : "Previous lines for context only: " + dialogueHistory.joined(separator: " | ") + "\n"
+                let prompt = "You are translating live dialogue subtitles for the video game \(activeGame). \(ctx)Translate the following line into natural, punchy Arabic suitable for gaming (return ONLY the Arabic translation, no quotes or notes):\n\(text)"
+                let payload: [String: Any] = ["contents": [["parts": [["text": prompt]]]]]
 
-        if !apiKey.isEmpty {
-            translateBatchWithGemini(lines: [text], apiKey: apiKey, modelId: modelId) { res in
-                if let first = res?.first, !first.isEmpty {
-                    completion(first)
-                } else {
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.timeoutInterval = 5
+                request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+                URLSession.shared.dataTask(with: request) { data, response, _ in
+                    if let http = response as? HTTPURLResponse, http.statusCode == 200,
+                       let data = data,
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let candidates = json["candidates"] as? [[String: Any]],
+                       let content = candidates.first?["content"] as? [String: Any],
+                       let parts = content["parts"] as? [[String: Any]],
+                       let translated = parts.first?["text"] as? String {
+                        completion(translated.trimmingCharacters(in: .whitespacesAndNewlines))
+                        return
+                    }
                     self.translateFreeFallback(text: text, completion: completion)
-                }
+                }.resume()
+                return
             }
-        } else {
-            translateFreeFallback(text: text, completion: completion)
         }
+        translateFreeFallback(text: text, completion: completion)
     }
 
-    private func translateBatchWithGemini(lines: [String], apiKey: String, modelId: String, completion: @escaping ([String]?) -> Void) {
-        let urlStr = "https://generativelanguage.googleapis.com/v1beta/models/\(modelId):generateContent?key=\(apiKey)"
+    private func translateBatchWithGemini(lines: [String], completion: @escaping ([String]?) -> Void) {
+        let urlStr = "https://generativelanguage.googleapis.com/v1beta/models/\(activeModel):generateContent?key=\(activeKey)"
         guard let url = URL(string: urlStr) else { completion(nil); return }
 
         let numbered = lines.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
-        let prompt = "You are an expert Arabic video game translator. Translate each numbered English game menu item or subtitle into concise, natural Arabic (for example: Play -> اللعب, Settings -> الإعدادات, Continue -> متابعة). Return ONLY a JSON array of Arabic strings in the exact same order, with no extra text.\nItems:\n" + numbered
+        let prompt = "You are an expert Arabic translator for the video game \(activeGame). Translate each numbered menu item into very concise Arabic (1-3 words max, e.g. Play -> اللعب, Settings -> الإعدادات, Casual -> لعب عادي). Return ONLY a JSON array of Arabic strings in the exact same order.\nItems:\n" + numbered
         let payload: [String: Any] = ["contents": [["parts": [["text": prompt]]]]]
 
         var request = URLRequest(url: url)
@@ -340,15 +410,17 @@ class SampleHandler: RPBroadcastSampleHandler {
         }.resume()
     }
 
+    private func sendKeepAlive() {
+        sendRawGet("keepalive=1")
+    }
+
+    private func sendClearToTV() {
+        sendRawGet("clear=1")
+    }
+
     private func sendSingleToTV(arabic: String) {
-        let defaults = UserDefaults(suiteName: appGroup)
-        let tvIP = defaults?.string(forKey: "tvIP")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "192.168.0.138"
         let encoded = arabic.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        guard let url = URL(string: "http://\(tvIP):8765/?text=\(encoded)") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 2
-        URLSession.shared.dataTask(with: request).resume()
+        sendRawGet("text=\(encoded)")
     }
 
     private func sendBlocksToTV(blocks: [OCRBlock], translations: [String]) {
@@ -363,10 +435,13 @@ class SampleHandler: RPBroadcastSampleHandler {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: items),
               let jsonStr = String(data: jsonData, encoding: .utf8),
               let encoded = jsonStr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return }
+        sendRawGet("items=\(encoded)")
+    }
 
+    private func sendRawGet(_ query: String) {
         let defaults = UserDefaults(suiteName: appGroup)
         let tvIP = defaults?.string(forKey: "tvIP")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "192.168.0.138"
-        guard let url = URL(string: "http://\(tvIP):8765/?items=\(encoded)") else { return }
+        guard let url = URL(string: "http://\(tvIP):8765/?\(query)") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 2

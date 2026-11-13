@@ -15,6 +15,7 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var lastProcessTime: CFAbsoluteTime = 0
     private var lastModeCheckTime: CFAbsoluteTime = 0
     private var lastSendTime: CFAbsoluteTime = 0
+    private var emptyFramesCount: Int = 0
     private var activeMode: String = "menus"
     private var lastSignature: String = ""
     private var isTranslating: Bool = false
@@ -55,6 +56,7 @@ class SampleHandler: RPBroadcastSampleHandler {
 
     override func broadcastStarted(withSetupInfo setupInfo: [String : NSObject]?) {
         lastSignature = ""
+        emptyFramesCount = 0
         fetchModeFromTV()
     }
 
@@ -67,7 +69,7 @@ class SampleHandler: RPBroadcastSampleHandler {
             fetchModeFromTV()
         }
 
-        if now - lastProcessTime < 0.9 || isTranslating {
+        if now - lastProcessTime < 0.8 || isTranslating {
             return
         }
         lastProcessTime = now
@@ -127,7 +129,6 @@ class SampleHandler: RPBroadcastSampleHandler {
                 let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                 if self.isNoise(clean) { continue }
 
-                // تصحيح الدوران 180 درجة ليطابق مكان الكلمات على شاشة التلفزيون
                 let x = 1.0 - Double(box.origin.x + box.size.width)
                 var topY = Double(box.origin.y)
 
@@ -139,12 +140,21 @@ class SampleHandler: RPBroadcastSampleHandler {
                 blocks.append(OCRBlock(text: clean, x: max(0.02, x), y: topY))
             }
 
-            guard !blocks.isEmpty else { return }
+            if blocks.isEmpty {
+                self.emptyFramesCount += 1
+                if self.emptyFramesCount >= 2 && !self.lastSignature.isEmpty {
+                    self.lastSignature = ""
+                    self.sendSingleToTV(arabic: "")
+                }
+                return
+            }
+
+            self.emptyFramesCount = 0
             let limited = Array(blocks.prefix(mode == "menus" ? 12 : 4))
             let signature = mode + ":" + limited.map { $0.text }.joined(separator: "|")
             let now = CFAbsoluteTimeGetCurrent()
 
-            if signature == self.lastSignature && (now - self.lastSendTime) < 4.5 {
+            if signature == self.lastSignature && (now - self.lastSendTime) < 3.5 {
                 return
             }
             self.lastSignature = signature
@@ -210,7 +220,7 @@ class SampleHandler: RPBroadcastSampleHandler {
         isTranslating = true
         let defaults = UserDefaults(suiteName: appGroup)
         let apiKey = defaults?.string(forKey: "geminiKey")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let modelId = defaults?.string(forKey: "modelId")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "gemma-4-27b-it"
+        let modelId = defaults?.string(forKey: "modelId")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "gemma-4-26b-a4b-it"
 
         let lines = needsTranslation.map { $0.text }
         if !apiKey.isEmpty {
@@ -257,7 +267,7 @@ class SampleHandler: RPBroadcastSampleHandler {
     private func translateLine(_ text: String, completion: @escaping (String?) -> Void) {
         let defaults = UserDefaults(suiteName: appGroup)
         let apiKey = defaults?.string(forKey: "geminiKey")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let modelId = defaults?.string(forKey: "modelId")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "gemma-4-27b-it"
+        let modelId = defaults?.string(forKey: "modelId")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "gemma-4-26b-a4b-it"
 
         if !apiKey.isEmpty {
             translateBatchWithGemini(lines: [text], apiKey: apiKey, modelId: modelId) { res in

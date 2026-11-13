@@ -1,0 +1,53 @@
+name: GameTranslator
+options:
+  bundleIdPrefix: com.tvtranslator
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+targets:
+  GameTranslator:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+    entitlements:
+      path: App/GameTranslator.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.tvtranslator.ipad
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: مترجم الألعاب
+        UILaunchScreen: {}
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSLocalNetworkUsageDescription: لإرسال الترجمة إلى شاشة التلفزيون عبر الشبكة المحلية
+    dependencies:
+      - target: GameTranslatorBroadcast
+
+  GameTranslatorBroadcast:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: BroadcastExtension
+    entitlements:
+      path: BroadcastExtension/BroadcastExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.tvtranslator.ipad
+    info:
+      path: BroadcastExtension/Info.plist
+      properties:
+        CFBundleDisplayName: مترجم الشاشة
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer

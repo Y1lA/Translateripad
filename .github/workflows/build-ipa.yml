@@ -1,0 +1,39 @@
+name: Build iPad Unsigned IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate and Build Unsigned IPA
+        run: |
+          if [ -f "ipad-game-translator/project.yml" ]; then cd ipad-game-translator; fi
+          xcodegen generate
+          xcodebuild \
+            -project GameTranslator.xcodeproj \
+            -scheme GameTranslator \
+            -configuration Release \
+            -sdk iphoneos \
+            CONFIGURATION_BUILD_DIR="$PWD/build_out" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+          mkdir -p Payload
+          cp -R build_out/GameTranslator.app Payload/
+          zip -r "$GITHUB_WORKSPACE/GameTranslator-unsigned.ipa" Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameTranslator-unsigned-ipa
+          path: GameTranslator-unsigned.ipa

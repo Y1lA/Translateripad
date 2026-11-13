@@ -11,11 +11,22 @@ struct ContentView: View {
     @AppStorage("modelId", store: UserDefaults(suiteName: "group.com.tvtranslator.ipad"))
     private var modelId: String = "gemma-4-27b-it"
 
+    @AppStorage("readerMode", store: UserDefaults(suiteName: "group.com.tvtranslator.ipad"))
+    private var readerMode: String = "subtitles"
+
     @State private var statusMessage: String = "جاهز للتشغيل"
 
     var body: some View {
         NavigationView {
             Form {
+                Section(header: Text("وضع القارئ الذكي")) {
+                    Picker("ماذا يترجم؟", selection: $readerMode) {
+                        Text("النصوص والحوارات فقط (أسفل الشاشة)").tag("subtitles")
+                        Text("القوائم والنصوص (فوق كل كلمة)").tag("menus")
+                    }
+                    .pickerStyle(.inline)
+                }
+
                 Section(header: Text("إعدادات التلفزيون")) {
                     TextField("عنوان IP التلفزيون", text: $tvIP)
                         .keyboardType(.URL)
@@ -27,12 +38,9 @@ struct ContentView: View {
                 }
 
                 Section(header: Text("إعدادات الذكاء الاصطناعي (Google AI Studio)")) {
-                    SecureField("مفتاح Gemini API (اختياري)", text: $geminiKey)
+                    SecureField("مفتاح Gemini API (موصى به لترجمة أفضل)", text: $geminiKey)
                     TextField("اسم الموديل", text: $modelId)
                         .autocapitalization(.none)
-                    Text("اترك المفتاح فارغاً للترجمة السريعة المجانية، أو ضع مفتاح AI Studio مع موديل مثل gemma-4-27b-it لترجمة أدق للهجة الشوارع.")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
                 }
 
                 Section(header: Text("تشغيل قارئ الشاشة")) {
@@ -42,9 +50,6 @@ struct ContentView: View {
                         BroadcastPickerRepresentable(bundleId: "com.tvtranslator.GameTranslator.GameTranslatorBroadcast")
                             .frame(width: 56, height: 56)
                     }
-                    Text("بعد الضغط، اختر «مترجم الشاشة» واضغط Start Broadcast، ثم افتح تطبيق PS Remote Play.")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
                 }
 
                 Section(header: Text("الحالة")) {
@@ -52,14 +57,14 @@ struct ContentView: View {
                         .foregroundColor(.blue)
                 }
             }
-            .navigationTitle("مترجم GTA 6")
+            .navigationTitle("مترجم الألعاب الذكي")
         }
         .environment(\.layoutDirection, .rightToLeft)
     }
 
     private func sendTestSubtitle() {
         let cleanIP = tvIP.trimmingCharacters(in: .whitespacesAndNewlines)
-        let encoded = "تم الربط بنجاح مع الآيباد!".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "Test"
+        let encoded = "تم التحديث بنجاح!".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "Test"
         guard let url = URL(string: "http://\(cleanIP):8765/?text=\(encoded)") else {
             statusMessage = "عنوان IP غير صحيح"
             return
@@ -74,7 +79,7 @@ struct ContentView: View {
                 if let error = error {
                     statusMessage = "فشل الاتصال: \(error.localizedDescription)"
                 } else if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                    statusMessage = "تم الإرسال بنجاح! تأكد من ظهور النص على التلفزيون."
+                    statusMessage = "تم الإرسال بنجاح!"
                 } else {
                     statusMessage = "استجابة غير متوقعة من التلفزيون"
                 }

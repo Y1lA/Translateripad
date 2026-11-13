@@ -45,7 +45,6 @@ class SampleHandler: RPBroadcastSampleHandler {
         request.recognitionLevel = .fast
         request.recognitionLanguages = ["en-US"]
         request.usesLanguageCorrection = true
-        // أسفل الشاشة (25% السفلية) حيث تظهر ترجمة الألعاب
         request.regionOfInterest = CGRect(x: 0.08, y: 0.03, width: 0.84, height: 0.24)
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
@@ -145,12 +144,12 @@ class SampleHandler: RPBroadcastSampleHandler {
     private func sendToTV(arabic: String) {
         let defaults = UserDefaults(suiteName: appGroup)
         let tvIP = defaults?.string(forKey: "tvIP")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "192.168.0.138"
-        guard let url = URL(string: "http://\(tvIP):8765/") else { return }
+        let encoded = arabic.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "http://\(tvIP):8765/?text=\(encoded)") else { return }
 
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = "GET"
         request.timeoutInterval = 2
-        request.httpBody = arabic.data(using: .utf8)
         URLSession.shared.dataTask(with: request).resume()
     }
 }

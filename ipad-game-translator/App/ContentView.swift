@@ -59,13 +59,14 @@ struct ContentView: View {
 
     private func sendTestSubtitle() {
         let cleanIP = tvIP.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: "http://\(cleanIP):8765/") else {
+        let encoded = "تم الربط بنجاح مع الآيباد!".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "Test"
+        guard let url = URL(string: "http://\(cleanIP):8765/?text=\(encoded)") else {
             statusMessage = "عنوان IP غير صحيح"
             return
         }
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = "تم الربط بنجاح مع الآيباد!".data(using: .utf8)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 4
         statusMessage = "جاري الإرسال..."
 
         URLSession.shared.dataTask(with: request) { _, response, error in

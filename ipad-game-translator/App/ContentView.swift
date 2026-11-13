@@ -12,7 +12,7 @@ struct ContentView: View {
     private var modelId: String = "gemma-4-27b-it"
 
     @AppStorage("readerMode", store: UserDefaults(suiteName: "group.com.tvtranslator.ipad"))
-    private var readerMode: String = "subtitles"
+    private var readerMode: String = "menus"
 
     @State private var statusMessage: String = "جاهز للتشغيل"
 
@@ -21,10 +21,13 @@ struct ContentView: View {
             Form {
                 Section(header: Text("وضع القارئ الذكي")) {
                     Picker("ماذا يترجم؟", selection: $readerMode) {
-                        Text("النصوص والحوارات فقط (أسفل الشاشة)").tag("subtitles")
                         Text("القوائم والنصوص (فوق كل كلمة)").tag("menus")
+                        Text("النصوص والحوارات فقط (أسفل الشاشة)").tag("subtitles")
                     }
                     .pickerStyle(.inline)
+                    .onChange(of: readerMode) { newMode in
+                        syncModeToTV(newMode)
+                    }
                 }
 
                 Section(header: Text("إعدادات التلفزيون")) {
@@ -58,11 +61,19 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("مترجم الألعاب الذكي")
+            .onAppear { syncModeToTV(readerMode) }
         }
         .environment(\.layoutDirection, .rightToLeft)
     }
 
+    private func syncModeToTV(_ mode: String) {
+        let cleanIP = tvIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: "http://\(cleanIP):8765/?setmode=\(mode)") else { return }
+        URLSession.shared.dataTask(with: url).resume()
+    }
+
     private func sendTestSubtitle() {
+        syncModeToTV(readerMode)
         let cleanIP = tvIP.trimmingCharacters(in: .whitespacesAndNewlines)
         let encoded = "تم التحديث بنجاح!".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "Test"
         guard let url = URL(string: "http://\(cleanIP):8765/?text=\(encoded)") else {

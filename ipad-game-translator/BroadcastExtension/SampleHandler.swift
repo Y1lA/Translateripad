@@ -1,6 +1,7 @@
 import ReplayKit
 import Vision
 import Foundation
+import ImageIO
 
 class SampleHandler: RPBroadcastSampleHandler {
 
@@ -12,22 +13,32 @@ class SampleHandler: RPBroadcastSampleHandler {
 
     override func broadcastStarted(withSetupInfo setupInfo: [String : NSObject]?) {
         lastEnglishText = ""
+        sendToTV(arabic: "بدأ قارئ الشاشة بالعمل...")
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
         guard sampleBufferType == .video else { return }
 
         let now = CFAbsoluteTimeGetCurrent()
-        if now - lastProcessTime < 0.7 || isTranslating {
+        if now - lastProcessTime < 0.9 || isTranslating {
             return
         }
         lastProcessTime = now
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        recognizeSubtitle(in: pixelBuffer)
+
+        var cgOrientation: CGImagePropertyOrientation = .up
+        if let orientationNum = CMGetAttachment(sampleBuffer, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber,
+           let rawOrientation = CGImagePropertyOrientation(rawValue: orientationNum.uint32Value) {
+            cgOrientation = rawOrientation
+        }
+
+        autoreleasepool {
+            recognizeSubtitle(in: pixelBuffer, orientation: cgOrientation)
+        }
     }
 
-    private func recognizeSubtitle(in pixelBuffer: CVPixelBuffer) {
+    private func recognizeSubtitle(in pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) {
         let request = VNRecognizeTextRequest { [weak self] req, _ in
             guard let self = self else { return }
             guard let observations = req.results as? [VNRecognizedTextObservation] else { return }
@@ -42,12 +53,12 @@ class SampleHandler: RPBroadcastSampleHandler {
             self.translateAndSend(english: combined)
         }
 
-        request.recognitionLevel = .fast
+        request.recognitionLevel = .accurate
         request.recognitionLanguages = ["en-US"]
         request.usesLanguageCorrection = true
-        request.regionOfInterest = CGRect(x: 0.08, y: 0.03, width: 0.84, height: 0.24)
+        request.regionOfInterest = CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.42)
 
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
         try? handler.perform([request])
     }
 

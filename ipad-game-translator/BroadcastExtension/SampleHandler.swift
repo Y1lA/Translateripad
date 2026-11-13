@@ -36,8 +36,21 @@ class SampleHandler: RPBroadcastSampleHandler {
         "LOAD": "تحميل",
         "NEW GAME": "لعبة جديدة",
         "TRAINING": "التدريب",
+        "CASUAL": "لعب عادي",
+        "COMPETITIVE": "تنافسي",
+        "TOURNAMENTS": "البطولات",
+        "PRIVATE MATCH": "مباراة خاصة",
+        "PLAY OFFLINE": "لعب أوفلاين",
+        "QUICK PLAY": "لعب سريع",
+        "CREATE PARTY": "إنشاء مجموعة",
         "STORE": "المتجر",
-        "CAREER": "المسيرة"
+        "CAREER": "المسيرة",
+        "STORY MODE": "طور القصة",
+        "ONLINE": "أونلاين",
+        "MISSIONS": "المهام",
+        "CONTROLS": "التحكم",
+        "AUDIO": "الصوت",
+        "DISPLAY": "الشاشة"
     ]
 
     override func broadcastStarted(withSetupInfo setupInfo: [String : NSObject]?) {
@@ -114,15 +127,16 @@ class SampleHandler: RPBroadcastSampleHandler {
                 let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                 if self.isNoise(clean) { continue }
 
-                let x = Double(box.origin.x)
-                var topY = 1.0 - Double(box.origin.y + box.size.height)
+                // تصحيح الدوران 180 درجة ليطابق مكان الكلمات على شاشة التلفزيون
+                let x = 1.0 - Double(box.origin.x + box.size.width)
+                var topY = Double(box.origin.y)
 
                 if is4by3 {
                     topY = (topY - 0.095) / 0.81
                 }
                 if topY < 0.02 || topY > 0.96 { continue }
 
-                blocks.append(OCRBlock(text: clean, x: x, y: topY))
+                blocks.append(OCRBlock(text: clean, x: max(0.02, x), y: topY))
             }
 
             guard !blocks.isEmpty else { return }
@@ -198,8 +212,8 @@ class SampleHandler: RPBroadcastSampleHandler {
         let apiKey = defaults?.string(forKey: "geminiKey")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let modelId = defaults?.string(forKey: "modelId")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "gemma-4-27b-it"
 
+        let lines = needsTranslation.map { $0.text }
         if !apiKey.isEmpty {
-            let lines = needsTranslation.map { $0.text }
             translateBatchWithGemini(lines: lines, apiKey: apiKey, modelId: modelId) { [weak self] translated in
                 guard let self = self else { return }
                 if let translated = translated, translated.count == needsTranslation.count {
@@ -211,33 +225,32 @@ class SampleHandler: RPBroadcastSampleHandler {
                     self.sendBlocksToTV(blocks: blocks, translations: allTranslations)
                     self.isTranslating = false
                 } else {
-                    self.fallbackMenuTranslate(blocks, initialMap: finalMap)
+                    self.batchFallbackTranslate(blocks: blocks, needs: needsTranslation, finalMap: finalMap)
                 }
             }
         } else {
-            fallbackMenuTranslate(blocks, initialMap: finalMap)
+            batchFallbackTranslate(blocks: blocks, needs: needsTranslation, finalMap: finalMap)
         }
     }
 
-    private func fallbackMenuTranslate(_ blocks: [OCRBlock], initialMap: [String: String]) {
-        let group = DispatchGroup()
-        var results = Array(repeating: "", count: blocks.count)
-        for (idx, b) in blocks.enumerated() {
-            if let hit = initialMap[b.text] ?? cache[b.text.uppercased()] ?? cache[b.text] {
-                results[idx] = hit
-                continue
+    private func batchFallbackTranslate(blocks: [OCRBlock], needs: [OCRBlock], finalMap: [String: String]) {
+        var updatedMap = finalMap
+        let joined = needs.map { $0.text }.joined(separator: "\n")
+        translateFreeFallback(text: joined) { [weak self] ar in
+            guard let self = self else { return }
+            if let ar = ar {
+                let parts = ar.components(separatedBy: "\n")
+                for (idx, item) in needs.enumerated() where idx < parts.count {
+                    let tr = parts[idx].trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !tr.isEmpty {
+                        self.cache[item.text] = tr
+                        updatedMap[item.text] = tr
+                    }
+                }
             }
-            group.enter()
-            translateFreeFallback(text: b.text) { [weak self] ar in
-                let val = ar ?? b.text
-                self?.cache[b.text] = val
-                results[idx] = val
-                group.leave()
-            }
-        }
-        group.notify(queue: .global()) { [weak self] in
-            self?.sendBlocksToTV(blocks: blocks, translations: results)
-            self?.isTranslating = false
+            let allTranslations = blocks.map { updatedMap[$0.text] ?? $0.text }
+            self.sendBlocksToTV(blocks: blocks, translations: allTranslations)
+            self.isTranslating = false
         }
     }
 

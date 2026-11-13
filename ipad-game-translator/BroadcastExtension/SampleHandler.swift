@@ -13,18 +13,26 @@ class SampleHandler: RPBroadcastSampleHandler {
 
     private let appGroup = "group.com.tvtranslator.ipad"
     private var lastProcessTime: CFAbsoluteTime = 0
+    private var lastModeCheckTime: CFAbsoluteTime = 0
+    private var activeMode: String = "menus"
     private var lastSignature: String = ""
     private var isTranslating: Bool = false
     private var cache: [String: String] = [:]
 
     override func broadcastStarted(withSetupInfo setupInfo: [String : NSObject]?) {
         lastSignature = ""
+        fetchModeFromTV()
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
         guard sampleBufferType == .video else { return }
 
         let now = CFAbsoluteTimeGetCurrent()
+        if now - lastModeCheckTime > 4.0 {
+            lastModeCheckTime = now
+            fetchModeFromTV()
+        }
+
         if now - lastProcessTime < 0.95 || isTranslating {
             return
         }
@@ -43,6 +51,20 @@ class SampleHandler: RPBroadcastSampleHandler {
         }
     }
 
+    private func fetchModeFromTV() {
+        let defaults = UserDefaults(suiteName: appGroup)
+        let tvIP = defaults?.string(forKey: "tvIP")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "192.168.0.138"
+        guard let url = URL(string: "http://\(tvIP):8765/?getmode=1") else { return }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 1.5
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let data = data, let m = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            if m == "subtitles" || m == "menus" {
+                self?.activeMode = m
+            }
+        }.resume()
+    }
+
     private func isNoise(_ s: String) -> Bool {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         if t.count < 2 { return true }
@@ -53,9 +75,7 @@ class SampleHandler: RPBroadcastSampleHandler {
     }
 
     private func recognizeScreen(in pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) {
-        let defaults = UserDefaults(suiteName: appGroup)
-        let mode = defaults?.string(forKey: "readerMode") ?? "subtitles"
-
+        let mode = activeMode
         let w = Double(CVPixelBufferGetWidth(pixelBuffer))
         let h = Double(CVPixelBufferGetHeight(pixelBuffer))
         let is4by3 = (max(w, h) / max(1.0, min(w, h))) < 1.55
@@ -83,7 +103,7 @@ class SampleHandler: RPBroadcastSampleHandler {
             }
 
             guard !blocks.isEmpty else { return }
-            let limited = Array(blocks.prefix(mode == "menus" ? 10 : 4))
+            let limited = Array(blocks.prefix(mode == "menus" ? 14 : 4))
             let signature = mode + ":" + limited.map { $0.text }.joined(separator: "|")
             if signature == self.lastSignature { return }
             self.lastSignature = signature
